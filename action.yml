@@ -1,0 +1,113 @@
+name: 'DTZ Containers - Update Job'
+description: 'Update an existing DTZ Containers job by fetching current config and overlaying provided fields.'
+inputs:
+  api_key:
+    description: 'DTZ API key (X-API-KEY)'
+    required: true
+  job_id:
+    description: 'JobId to update'
+    required: true
+  name:
+    description: 'Job name; leave as __UNCHANGED__ to keep current'
+    required: false
+    default: '__UNCHANGED__'
+  container_image:
+    description: 'Container image repository, e.g., "nginx" or "myrepo/app"'
+    required: false
+    default: '__UNCHANGED__'
+  container_pull_user:
+    description: 'Registry username; set "" to clear; __UNCHANGED__ to keep'
+    required: false
+    default: '__UNCHANGED__'
+  container_pull_pwd:
+    description: 'Registry password; set "" to clear; __UNCHANGED__ to keep'
+    required: false
+    default: '__UNCHANGED__'
+  schedule_type:
+    description: 'Schedule type: relaxed | precise | none; leave as __UNCHANGED__ to keep'
+    required: false
+    default: '__UNCHANGED__'
+  schedule_cron:
+    description: 'Cron expression; set "" to clear; __UNCHANGED__ to keep'
+    required: false
+    default: '__UNCHANGED__'
+  schedule_repeat:
+    description: "ecoMode bounds, e.g., 'min(daily) max(weekly)'; set '' to clear; __UNCHANGED__ to keep"
+    required: false
+    default: '__UNCHANGED__'
+  env_variables:
+    description: 'JSON object of env variables. Example: {"KEY":"value","SECRET":{"plainValue":"x"}}'
+    required: false
+    default: '__UNCHANGED__'
+outputs:
+  job:
+    description: 'Updated job JSON'
+    value: ${{ steps.update.outputs.job }}
+runs:
+  using: "composite"
+  steps:
+    - name: Fetch current job
+      id: fetch
+      shell: bash
+      env:
+        API_KEY: ${{ inputs.api_key }}
+        JOB_ID: ${{ inputs.job_id }}
+      run: |
+        set -euo pipefail
+        BASE_URL='https://containers.dtz.rocks'
+        API_VERSION='2021-02-21'
+        URL="${BASE_URL}/api/${API_VERSION}/job/${JOB_ID}"
+        HTTP_CODE=$(curl --compressed -sS -w "%{http_code}" -H "accept: application/json" -H "X-API-KEY: ${API_KEY}" "${URL}" -o job.json)
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "Failed to fetch job ${JOB_ID}. HTTP $HTTP_CODE" >&2
+          cat job.json || true
+          exit 1
+        fi
+        jq '{name,containerImage,containerPullUser,containerPullPwd,scheduleType,scheduleCron,scheduleRepeat,envVariables} | .envVariables = (.envVariables // {})' job.json > base.json
+    - name: Build update payload
+      id: build
+      shell: bash
+      env:
+        INPUT_NAME: ${{ inputs.name }}
+        INPUT_CONTAINER_IMAGE: ${{ inputs.container_image }}
+        INPUT_CONTAINER_PULL_USER: ${{ inputs.container_pull_user }}
+        INPUT_CONTAINER_PULL_PWD: ${{ inputs.container_pull_pwd }}
+        INPUT_SCHEDULE_TYPE: ${{ inputs.schedule_type }}
+        INPUT_SCHEDULE_CRON: ${{ inputs.schedule_cron }}
+        INPUT_SCHEDULE_REPEAT: ${{ inputs.schedule_repeat }}
+        INPUT_ENV_VARIABLES: ${{ inputs.env_variables }}
+      run: |
+        set -euo pipefail
+
+        jq -n '
+          {}
+          | (if env.INPUT_NAME != "__UNCHANGED__" then .name = env.INPUT_NAME else . end)
+          | (if env.INPUT_CONTAINER_IMAGE != "__UNCHANGED__" then .containerImage = env.INPUT_CONTAINER_IMAGE else . end)
+          | (if env.INPUT_CONTAINER_PULL_USER == "" then .containerPullUser = "" else (if env.INPUT_CONTAINER_PULL_USER != "__UNCHANGED__" then .containerPullUser = env.INPUT_CONTAINER_PULL_USER else . end) end)
+          | (if env.INPUT_CONTAINER_PULL_PWD == "" then .containerPullPwd = "" else (if env.INPUT_CONTAINER_PULL_PWD != "__UNCHANGED__" then .containerPullPwd = env.INPUT_CONTAINER_PULL_PWD else . end) end)
+          | (if env.INPUT_SCHEDULE_TYPE != "__UNCHANGED__" then .scheduleType = env.INPUT_SCHEDULE_TYPE else . end)
+          | (if env.INPUT_SCHEDULE_CRON == "" then .scheduleCron = "" else (if env.INPUT_SCHEDULE_CRON != "__UNCHANGED__" then .scheduleCron = env.INPUT_SCHEDULE_CRON else . end) end)
+          | (if env.INPUT_SCHEDULE_REPEAT == "" then .scheduleRepeat = "" else (if env.INPUT_SCHEDULE_REPEAT != "__UNCHANGED__" then .scheduleRepeat = env.INPUT_SCHEDULE_REPEAT else . end) end)
+          | (if env.INPUT_ENV_VARIABLES != "__UNCHANGED__" then .envVariables = (env.INPUT_ENV_VARIABLES | fromjson) else . end)
+        ' > overlay.json
+
+        jq -s '.[0] * .[1]' base.json overlay.json | jq 'del(.. | nulls)' > payload.json
+
+        echo "Payload:"
+        jq . payload.json
+    - name: Update job
+      id: update
+      shell: bash
+      env:
+        API_KEY: ${{ inputs.api_key }}
+        JOB_ID: ${{ inputs.job_id }}
+      run: |
+        set -euo pipefail
+        URL="https://containers.dtz.rocks/api/2021-02-21/job/${JOB_ID}"
+        HTTP_CODE=$(curl --compressed -sS -w "%{http_code}" -H "accept: application/json" -H "content-type: application/json" -H "X-API-KEY: ${API_KEY}" -X POST "${URL}" -d @payload.json -o response.json)
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "Failed to update job ${JOB_ID}. HTTP $HTTP_CODE" >&2
+          cat response.json || true
+          exit 1
+        fi
+        echo "job=$(cat response.json | jq -c .)" >> "$GITHUB_OUTPUT"
